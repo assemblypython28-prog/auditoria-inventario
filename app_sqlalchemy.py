@@ -21,48 +21,57 @@ except Exception:
     _EASYOCR_READER = None
 
 # ============================================================
-# CONFIGURACAO SQLALCHEMY + COCKROACHDB
+# CONFIGURACAO SQLALCHEMY + COCKROACHDB (VERSAO CORRIGIDA)
 # ============================================================
-@st.cache_resource
+
 def get_engine():
     """Cria engine SQLAlchemy com connection pooling para CockroachDB."""
-
-    # Pega a URL do secrets.toml (Streamlit Cloud) ou variável de ambiente
+    
     db_url = ""
-
+    
     # Tenta secrets.toml primeiro (Streamlit Cloud)
     try:
         db_config = st.secrets.get("database", {})
         db_url = db_config.get("url", "")
-    except Exception:
-        pass
-
+        if db_url:
+            st.sidebar.success("✅ Secrets carregados do Streamlit Cloud")
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ Secrets não acessíveis: {e}")
+    
     # Se não achou no secrets, tenta variável de ambiente
     if not db_url:
         db_url = os.environ.get("DATABASE_URL", "")
-
+        if db_url:
+            st.sidebar.info("ℹ️ Usando DATABASE_URL do ambiente")
+    
     if not db_url:
-        return None
-
+        return None, "Nenhuma DATABASE_URL encontrada. Configure em Settings → Secrets."
+    
     # Converte "cockroachdb://" para "postgresql+psycopg2://"
     if db_url.startswith("cockroachdb://"):
         db_url = db_url.replace("cockroachdb://", "postgresql+psycopg2://", 1)
-
-    # Cria engine com pooling otimizado
-    engine = create_engine(
-        db_url,
-        poolclass=QueuePool,
-        pool_size=3,
-        max_overflow=5,
-        pool_pre_ping=True,
-        pool_recycle=300,
-        connect_args={
-            'connect_timeout': 15,
-            'options': '-c statement_timeout=30000'
-        }
-    )
-
-    return engine
+    
+    # Mascara a URL para log (não expõe senha)
+    url_display = db_url.replace("://", "://***:***@") if "@" in db_url else "***"
+    st.sidebar.text(f"URL detectada: {url_display[:60]}...")
+    
+    try:
+        # Cria engine com pooling otimizado para CockroachDB serverless
+        engine = create_engine(
+            db_url,
+            poolclass=QueuePool,
+            pool_size=1,           # REDUZIDO: CockroachDB serverless limita conexões
+            max_overflow=2,        # REDUZIDO: evita estourar limite
+            pool_pre_ping=True,    # Verifica conexão antes de usar
+            pool_recycle=300,      # Recicla conexões a cada 5 min
+            connect_args={
+                'connect_timeout': 30,      # AUMENTADO: conexões internacionais
+                'options': '-c statement_timeout=60000'  # AUMENTADO: 60s
+            }
+        )
+        return engine, None
+    except Exception as e:
+        return None, f"Erro ao criar engine: {str(e)}"
 
 def test_connection(engine):
     """Testa se a conexão com o banco está funcionando."""
@@ -71,6 +80,7 @@ def test_connection(engine):
             result = conn.execute(text("SELECT 1 as test"))
             return result.fetchone()[0] == 1
     except Exception as e:
+        st.sidebar.error(f"❌ Erro na conexão: {str(e)}")
         return False
 
 def criar_tabela_inventario(engine):
@@ -83,10 +93,10 @@ def criar_tabela_inventario(engine):
                 FROM information_schema.tables 
                 WHERE table_schema = 'public' AND table_name = 'inventario'
             """))
-
+            
             if result.fetchone():
                 return True  # Tabela já existe
-
+            
             # Cria a tabela
             conn.execute(text("""
                 CREATE TABLE inventario (
@@ -104,7 +114,7 @@ def criar_tabela_inventario(engine):
                     CONSTRAINT unique_codigo_obra UNIQUE (obra_id, codigo)
                 )
             """))
-
+            
             # Cria índices
             conn.execute(text("""
                 CREATE INDEX idx_inventario_obra_id ON inventario (obra_id)
@@ -112,21 +122,21 @@ def criar_tabela_inventario(engine):
             conn.execute(text("""
                 CREATE INDEX idx_inventario_codigo ON inventario (obra_id, codigo)
             """))
-
+            
             conn.commit()
             return True
-
+            
     except Exception as e:
         st.error(f"Erro ao criar tabela: {e}")
         return False
 
-# Inicializa engine global
-engine = get_engine()
+# Inicializa engine global com diagnóstico
+engine, erro_engine = get_engine()
 
 # ============================================================
 # FUNCOES DE RETRY
 # ============================================================
-def execute_with_retry(query_func, max_retries=5, base_delay=0.1):
+def execute_with_retry(query_func, max_retries=5, base_delay=0.5):
     """Executa query com retry automático para erros de transação."""
     for attempt in range(max_retries):
         conn = None
@@ -139,7 +149,7 @@ def execute_with_retry(query_func, max_retries=5, base_delay=0.1):
             error_msg = str(e).lower()
             retry_codes = ['40001', '40003', '08006', '08001', 'retry', 'serialization']
             should_retry = any(code in error_msg for code in retry_codes)
-
+            
             if should_retry and attempt < max_retries - 1:
                 delay = base_delay * (2 ** attempt)
                 time.sleep(delay)
@@ -167,15 +177,15 @@ def carregar_do_banco(obra_id="default"):
                 ORDER BY codigo
             """), {"obra_id": obra_id})
             return result.mappings().all()
-
+        
         dados = execute_with_retry(_carregar)
-
+        
         if not dados:
             return pd.DataFrame(columns=["Codigo do Bem", "Descricao do Bem", "Status", 
                                          "Data Auditoria", "Observacoes", "Quantidade", "Local"])
-
+        
         df = pd.DataFrame([dict(row) for row in dados])
-
+        
         mapeamento = {
             "codigo": "Codigo do Bem",
             "descricao": "Descricao do Bem",
@@ -185,17 +195,17 @@ def carregar_do_banco(obra_id="default"):
             "quantidade": "Quantidade",
             "local": "Local"
         }
-
+        
         df = df.rename(columns={k: v for k, v in mapeamento.items() if k in df.columns})
-
+        
         for col in ["Codigo do Bem", "Descricao do Bem", "Status", 
                     "Data Auditoria", "Observacoes", "Quantidade", "Local"]:
             if col not in df.columns:
                 df[col] = ""
-
+        
         return df[["Codigo do Bem", "Descricao do Bem", "Status", 
                    "Data Auditoria", "Observacoes", "Quantidade", "Local"]]
-
+        
     except Exception as e:
         st.error(f"Erro ao carregar: {e}")
         return pd.DataFrame(columns=["Codigo do Bem", "Descricao do Bem", "Status", 
@@ -204,18 +214,18 @@ def carregar_do_banco(obra_id="default"):
 def salvar_lote_banco(df, obra_id="default"):
     try:
         total_excel = len(df)
-
+        
         def _contar(conn):
             result = conn.execute(text("""
                 SELECT COUNT(*) as total FROM inventario WHERE obra_id = :obra_id
             """), {"obra_id": obra_id})
             return result.fetchone()[0]
-
+        
         total_banco = execute_with_retry(_contar)
-
+        
         if total_banco > 0 and total_banco == total_excel:
             return {"status": "carregar", "mensagem": f"{total_excel} itens já carregados."}
-
+        
         if total_banco == 0:
             def _inserir_tudo(conn):
                 for _, row in df.iterrows():
@@ -235,10 +245,10 @@ def salvar_lote_banco(df, obra_id="default"):
                         "local": str(row.get("Local", ""))
                     })
                 return True
-
+            
             execute_with_retry(_inserir_tudo)
             return {"status": "sucesso", "novos": total_excel, "alterados": 0, "iguais": 0}
-
+        
         def _buscar_existentes(conn):
             result = conn.execute(text("""
                 SELECT codigo, descricao, status 
@@ -246,20 +256,20 @@ def salvar_lote_banco(df, obra_id="default"):
                 WHERE obra_id = :obra_id
             """), {"obra_id": obra_id})
             return result.mappings().all()
-
+        
         existentes = execute_with_retry(_buscar_existentes)
         existentes_dict = {str(item["codigo"]): dict(item) for item in existentes}
-
+        
         novos = 0
         alterados = 0
         iguais = 0
-
+        
         def _processar(conn):
             nonlocal novos, alterados, iguais
             for _, row in df.iterrows():
                 codigo = str(row["Codigo do Bem"])
                 descricao = str(row["Descricao do Bem"])
-
+                
                 if codigo in existentes_dict:
                     if existentes_dict[codigo]["descricao"] != descricao:
                         status_manter = existentes_dict[codigo]["status"] if existentes_dict[codigo]["status"] == "Auditado" else str(row.get("Status", "Pendente"))
@@ -286,14 +296,14 @@ def salvar_lote_banco(df, obra_id="default"):
                     })
                     novos += 1
             return True
-
+        
         execute_with_retry(_processar)
-
+        
         if novos == 0 and alterados == 0:
             return {"status": "carregar", "mensagem": f"{total_excel} itens já atualizados."}
-
+        
         return {"status": "sucesso", "novos": novos, "alterados": alterados, "iguais": iguais}
-
+        
     except Exception as e:
         st.error(f"Erro ao salvar lote: {e}")
         return {"status": "erro", "mensagem": str(e)}
@@ -305,9 +315,9 @@ def salvar_item_banco(codigo, descricao, status="Pendente", data_aud="", obs="",
                 SELECT id FROM inventario 
                 WHERE obra_id = :obra_id AND codigo = :codigo
             """), {"obra_id": obra_id, "codigo": str(codigo)})
-
+            
             existe = result.fetchone()
-
+            
             if existe:
                 conn.execute(text("""
                     UPDATE inventario 
@@ -323,12 +333,12 @@ def salvar_item_banco(codigo, descricao, status="Pendente", data_aud="", obs="",
                     VALUES (:obra_id, :codigo, :descricao, :status, :data_aud, :obs, :qtd, :local)
                 """), {"obra_id": obra_id, "codigo": str(codigo), "descricao": str(descricao),
                        "status": status, "data_aud": data_aud, "obs": obs, "qtd": qtd, "local": local})
-
+            
             return True
-
+        
         execute_with_retry(_salvar)
         return True
-
+        
     except Exception as e:
         st.error(f"Erro ao salvar item: {e}")
         return False
@@ -340,10 +350,10 @@ def deletar_obra_banco(obra_id):
                 DELETE FROM inventario WHERE obra_id = :obra_id
             """), {"obra_id": obra_id})
             return True
-
+        
         execute_with_retry(_deletar)
         return True
-
+        
     except Exception as e:
         st.error(f"Erro ao deletar obra: {e}")
         return False
@@ -353,10 +363,10 @@ def deletar_tudo_banco():
         def _deletar(conn):
             conn.execute(text("TRUNCATE TABLE inventario"))
             return True
-
+        
         execute_with_retry(_deletar)
         return True
-
+        
     except Exception as e:
         st.error(f"Erro ao truncar: {e}")
         return False
@@ -368,9 +378,9 @@ def listar_obras_banco():
                 SELECT DISTINCT obra_id FROM inventario ORDER BY obra_id
             """))
             return [row[0] for row in result.fetchall()]
-
+        
         return execute_with_retry(_listar)
-
+        
     except Exception as e:
         st.error(f"Erro ao listar obras: {e}")
         return []
@@ -463,37 +473,55 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ============================================================
-# VERIFICACAO INICIAL DO BANCO (AUTO-CREATE TABLE)
+# VERIFICACAO INICIAL DO BANCO (AUTO-CREATE TABLE) - CORRIGIDO
 # ============================================================
-if engine is None:
-    st.error("""
-    ❌ **DATABASE_URL não configurada!**
 
-    Configure no Streamlit Cloud Secrets:
+# DIAGNÓSTICO: Mostra status da engine na sidebar
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔍 Diagnóstico de Conexão")
+
+if engine is None:
+    st.sidebar.error(f"❌ Engine não criada: {erro_engine}")
+    st.error(f"""
+    ❌ **DATABASE_URL não configurada ou inválida!**
+    
+    **Erro:** {erro_engine}
+    
+    **Configure no Streamlit Cloud Secrets:**
     ```toml
     [database]
-    url = "postgresql+psycopg2://usuario:senha@host:porta/database?sslmode=verify-full"
+    url = "postgresql+psycopg2://usuario:senha@host:porta/database?sslmode=require"
     ```
+    
+    **Ou defina a variável de ambiente DATABASE_URL.**
     """)
     st.stop()
 
 # Testa conexão e cria tabela automaticamente
 with st.spinner("🔌 Conectando ao CockroachDB e verificando tabela..."):
-    if not test_connection(engine):
+    conectado = test_connection(engine)
+    if not conectado:
         st.error("""
         ❌ **Não foi possível conectar ao CockroachDB!**
-
-        Verifique:
+        
+        **Verifique:**
         1. A URL está correta no Secrets
         2. O cluster está ativo (não pausado)
         3. A senha está correta
+        4. O usuário tem permissões no banco
+        
+        **Dica:** No console do CockroachDB, vá em **SQL Users** e certifique-se de que o usuário existe e a senha está correta.
         """)
         st.stop()
-
+    
+    st.sidebar.success("✅ Conexão com CockroachDB OK!")
+    
     tabela_criada = criar_tabela_inventario(engine)
     if not tabela_criada:
         st.error("❌ Erro ao criar/verificar tabela 'inventario'")
         st.stop()
+    
+    st.sidebar.success("✅ Tabela 'inventario' verificada!")
 
 # ============================================================
 # INTERFACE PRINCIPAL
@@ -504,9 +532,9 @@ st.markdown("<p style=\"color: #64748B; margin-bottom: 24px;\">Sistema de audito
 # Barra lateral
 with st.sidebar:
     st.markdown("### Identificacao da Obra")
-
+    
     obras_existentes = listar_obras_banco()
-
+    
     obra_id = st.text_input("ID da Obra:", value=st.session_state.get("obra_id", "obra_001"), help="Use um ID unico para cada obra")
     if obras_existentes:
         obra_selecionada = st.selectbox("Ou selecione obra existente:", [""] + obras_existentes)
@@ -516,11 +544,11 @@ with st.sidebar:
         st.session_state.obra_id = obra_id
         st.session_state.db = carregar_do_banco(obra_id)
         st.rerun()
-
+    
     st.markdown("---")
     st.markdown("### Importar Excel")
     arquivo = st.file_uploader("Selecionar ficheiro", type=["xlsx", "xls"], key="excel_uploader")
-
+    
     if arquivo is not None:
         try:
             with st.spinner("Lendo Excel..."):
@@ -535,13 +563,13 @@ with st.sidebar:
                 df_clean["Quantidade"] = "1"
                 df_clean["Local"] = ""
                 total = len(df_clean)
-
+                
                 status_text = st.empty()
                 status_text.text(f"Verificando {total} itens...")
-
+                
                 resultado = salvar_lote_banco(df_clean, obra_id)
                 status_text.empty()
-
+                
                 if resultado == False:
                     st.error("Erro ao importar. Tente novamente.")
                 elif isinstance(resultado, dict) and resultado.get("status") == "erro":
@@ -564,7 +592,7 @@ with st.sidebar:
                     st.success(f"✅ {total} itens processados em '{obra_id}'")
         except Exception as e:
             st.error(f"Erro ao importar: {e}")
-
+    
     st.markdown("---")
     st.markdown("### Exportar Excel")
     df_atual = st.session_state.get("db", pd.DataFrame())
@@ -573,18 +601,18 @@ with st.sidebar:
         st.download_button(label="Baixar Inventario", data=excel_bytes, file_name=f"inventario_{obra_id}_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
         st.info("Nenhum dado para exportar")
-
+    
     st.markdown("---")
     st.markdown("### Zona de Perigo")
-
+    
     if st.button("Limpar Tela da Obra", type="secondary"):
         st.session_state.db = pd.DataFrame(columns=["Codigo do Bem", "Descricao do Bem", "Status", "Data Auditoria", "Observacoes", "Quantidade", "Local"])
         st.success(f"Tela da obra '{obra_id}' limpa!")
         time.sleep(1)
         st.rerun()
-
+    
     st.markdown("<br>", unsafe_allow_html=True)
-
+    
     with st.expander("⚠️ Excluir Obra do Banco", expanded=False):
         st.warning(f"Isso vai APAGAR permanentemente todos os dados da obra '{obra_id}'!")
         confirmacao = st.text_input("Digite 'EXCLUIR' para confirmar:", placeholder="EXCLUIR")
@@ -600,9 +628,9 @@ with st.sidebar:
                     st.error("Erro ao excluir obra.")
             else:
                 st.error("Digite 'EXCLUIR' corretamente.")
-
+    
     st.markdown("<br>", unsafe_allow_html=True)
-
+    
     with st.expander("🚨 EXCLUIR TUDO DO BANCO", expanded=False):
         st.error("⚠️ ATENÇÃO: Isso vai APAGAR TODOS os dados de TODAS as obras!")
         confirmacao1 = st.text_input("Digite 'APAGAR TUDO' para confirmar:", placeholder="APAGAR TUDO", key="confirm_tudo")
@@ -621,7 +649,7 @@ with st.sidebar:
                     st.error(f"Erro: {e}")
             else:
                 st.error("Digite 'APAGAR TUDO' corretamente.")
-
+    
     st.markdown("---")
     st.markdown("**Resumo**")
     df_stats = st.session_state.get("db", pd.DataFrame())
@@ -656,17 +684,17 @@ if df_atual.empty:
     """)
 else:
     tab1, tab2, tab3, tab_sobre = st.tabs(["Scanner e OCR", "Lista Completa", "Dashboard", "Sobre"])
-
+    
     with tab1:
         st.markdown("### Captura da Etiqueta com OCR")
         if not EASYOCR_DISPONIVEL:
             st.warning("OCR nao disponivel. Verifique se 'easyocr' esta em requirements.txt.")
         else:
             st.info("Dica: Aponte a camera para a etiqueta e tire a foto.")
-
+        
         foto = st.camera_input("Aponte a camera para a etiqueta e clique em 'Take Photo'")
         codigo_detectado = None
-
+        
         if foto is not None:
             col1, col2 = st.columns([1, 1])
             with col1:
@@ -689,7 +717,7 @@ else:
                             st.warning("Nenhum texto detectado.")
                 else:
                     st.info("OCR desabilitado.")
-
+        
         st.markdown("---")
         st.markdown("### Confirmar ou Digitar Codigo Manualmente")
         busca = st.text_input("Numero do Ativo:", value=st.session_state.codigo_ocr, placeholder="Ex: 00000333 ou 333")
@@ -698,7 +726,7 @@ else:
             if st.button("Limpar OCR e Tentar Novamente"):
                 st.session_state.codigo_ocr = ""
                 st.rerun()
-
+        
         if busca:
             alvo = normalizar(busca)
             item = df_atual[df_atual["Codigo do Bem"].astype(str).apply(normalizar) == alvo]
@@ -744,11 +772,11 @@ else:
                             st.rerun()
                         else:
                             st.warning("Digite uma descricao.")
-
+        
         st.markdown("---")
         st.markdown("### Cadastrar Item Sem Patrimonio")
         st.markdown('<div class="sem-pat-box"><p>Cadastre itens <strong>sem etiqueta de patrimonio</strong>.</p></div>', unsafe_allow_html=True)
-
+        
         with st.form("form_sem_patrimonio"):
             col_sp1, col_sp2 = st.columns(2)
             with col_sp1:
@@ -757,7 +785,7 @@ else:
                 qtd_sem_pat = st.number_input("Quantidade:", min_value=1, value=1, step=1)
             local_sem_pat = st.text_input("Local / Setor:", placeholder="Ex: Escritorio 3...")
             obs_sem_pat = st.text_area("Observacoes:", placeholder="Ex: Item novo...", height=60)
-
+            
             submitted = st.form_submit_button("CADASTRAR ITEM SEM PATRIMONIO", type="primary")
             if submitted:
                 if desc_sem_pat and local_sem_pat:
@@ -776,7 +804,7 @@ else:
                         st.rerun()
                 else:
                     st.warning("Preencha Descricao e Local.")
-
+    
     with tab2:
         st.markdown("### Inventario Completo")
         df_lista = st.session_state.db
@@ -797,7 +825,7 @@ else:
             df_filtrado = df_filtrado[df_filtrado["Descricao do Bem"].str.contains(busca_texto, case=False, na=False)]
         st.dataframe(df_filtrado, use_container_width=True, height=500)
         st.caption(f"Mostrando {len(df_filtrado)} de {len(df_lista)} itens")
-
+    
     with tab3:
         st.markdown("### Dashboard da Auditoria")
         df_dash = st.session_state.db
@@ -834,7 +862,7 @@ else:
                 st.dataframe(ultimos[["Codigo do Bem", "Descricao do Bem", "Data Auditoria", "Observacoes", "Quantidade", "Local"]], use_container_width=True)
             else:
                 st.info("Nenhum item auditado.")
-
+    
     with tab_sobre:
         st.markdown("### Sobre o Sistema")
         st.markdown("""
@@ -845,7 +873,7 @@ else:
             </p>
         </div>
         """, unsafe_allow_html=True)
-
+        
         col_about1, col_about2 = st.columns(2)
         with col_about1:
             st.markdown("""
@@ -864,7 +892,7 @@ else:
                 </ul>
             </div>
             """, unsafe_allow_html=True)
-
+        
         st.markdown("---")
         st.markdown("""
         <div style="background: #ECFDF5; border-radius: 12px; padding: 24px; border: 2px solid #10B981; text-align: center;">
