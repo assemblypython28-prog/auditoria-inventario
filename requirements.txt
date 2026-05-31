@@ -5,3 +5,4 @@ Pillow
 easyocr
 sqlalchemy
 psycopg2-binary
+python-dotenv
