@@ -5,9 +5,28 @@ import io
 import re
 import os
 from PIL import Image
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import OperationalError, IntegrityError
+
+# ============================================================
+# WORKAROUND: Intercepta conexao psycopg2 antes do SQLAlchemy
+# ============================================================
+import psycopg2
+from psycopg2.extensions import connection as _pg_connection
+
+# Guarda o __init__ original
+_original_pg_init = _pg_connection.__init__
+
+def _patched_pg_init(self, *args, **kwargs):
+    """Patch que intercepta a conexao e forca a versao do servidor."""
+    _original_pg_init(self, *args, **kwargs)
+    # Forca a versao do servidor para PostgreSQL 14.0
+    # Isso evita o erro de parse do CockroachDB v25.x
+    object.__setattr__(self, '_server_version', 140000)
+
+# Aplica o patch no __init__ da conexao psycopg2
+_pg_connection.__init__ = _patched_pg_init
 
 # ============================================================
 # CONFIGURAR OCR (EasyOCR)
@@ -51,30 +70,14 @@ def get_engine():
     if db_url.startswith("cockroachdb://"):
         db_url = db_url.replace("cockroachdb://", "postgresql+psycopg2://", 1)
     
-    # Garante que está usando psycopg2 (não pg8000)
+    # Garante que está usando psycopg2
     if "pg8000" in db_url:
         db_url = db_url.replace("postgresql+pg8000://", "postgresql+psycopg2://")
         st.sidebar.warning("⚠️ Convertendo pg8000 para psycopg2")
     
-    # Mascara a URL para log (não expõe senha)
+    # Mascara a URL para log
     url_display = db_url.replace("://", "://***:***@") if "@" in db_url else "***"
     st.sidebar.text(f"URL detectada: {url_display[:60]}...")
-    
-    try:
-        # WORKAROUND: Forca versao do servidor para evitar erro de parse do CockroachDB v25.x
-        import psycopg2
-        # Monkey-patch para contornar o bug de versao
-        original_get_server_version = psycopg2.extensions.ConnectionInfo.server_version
-        
-        def patched_server_version(self):
-            # Retorna versao PostgreSQL 14.0 (140000) em vez de tentar parsear a do CockroachDB
-            return 140000
-        
-        psycopg2.extensions.ConnectionInfo.server_version = property(patched_server_version)
-        st.sidebar.info("🔧 Workaround de versao aplicado")
-        
-    except Exception as e:
-        st.sidebar.warning(f"⚠️ Nao foi possivel aplicar workaround: {e}")
     
     try:
         engine = create_engine(
@@ -104,7 +107,7 @@ def test_connection(engine):
         return False
 
 def criar_tabela_inventario(engine):
-    """Cria a tabela de inventário se não existir. Retorna True se sucesso."""
+    """Cria a tabela de inventário se não existir."""
     try:
         with engine.connect() as conn:
             result = conn.execute(text("""
