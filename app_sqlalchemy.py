@@ -5,10 +5,9 @@ import io
 import re
 import os
 from PIL import Image
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import OperationalError, IntegrityError, ProgrammingError
-from dotenv import load_dotenv
+from sqlalchemy.exc import OperationalError, IntegrityError
 
 # ============================================================
 # CONFIGURAR OCR (EasyOCR)
@@ -28,22 +27,19 @@ except Exception:
 def get_engine():
     """Cria engine SQLAlchemy com connection pooling para CockroachDB."""
 
-    # Tenta carregar do .env primeiro (local)
+    # Pega a URL do secrets.toml (Streamlit Cloud) ou variável de ambiente
+    db_url = ""
+
+    # Tenta secrets.toml primeiro (Streamlit Cloud)
     try:
-        load_dotenv()
-    except:
+        db_config = st.secrets.get("database", {})
+        db_url = db_config.get("url", "")
+    except Exception:
         pass
 
-    # Pega a URL do ambiente ou do secrets.toml
-    db_url = os.environ.get("DATABASE_URL", "")
-
-    # Se não encontrou no env, tenta o secrets.toml (Streamlit Cloud)
+    # Se não achou no secrets, tenta variável de ambiente
     if not db_url:
-        try:
-            db_config = st.secrets.get("database", {})
-            db_url = db_config.get("url", "")
-        except Exception:
-            db_url = ""
+        db_url = os.environ.get("DATABASE_URL", "")
 
     if not db_url:
         return None
@@ -883,4 +879,4 @@ else:
         """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.caption("Sistema de Auditoria de Ativos")
+st.caption("Sistema de Auditoria de Ativos ")
