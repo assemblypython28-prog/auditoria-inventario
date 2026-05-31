@@ -5,23 +5,20 @@ import io
 import re
 import os
 from PIL import Image
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import OperationalError, IntegrityError
-from sqlalchemy.dialects.postgresql.psycopg2 import PGDialect_psycopg2
 
 # ============================================================
-# WORKAROUND: Sobrescreve o dialect original do psycopg2
+# WORKAROUND: Intercepta conexao e forca versao do servidor
 # ============================================================
-class CockroachDBDialect(PGDialect_psycopg2):
-    """Dialect que forca versao PostgreSQL 14.0 para evitar erro com CockroachDB v25.x"""
-    
-    def _get_server_version_info(self, connection):
-        return (14, 0)
-
-# Sobrescreve o dialect original 'postgresql.psycopg2' no registry do SQLAlchemy
-from sqlalchemy.dialects import registry
-registry._registry['postgresql.psycopg2'] = ('__main__', 'CockroachDBDialect')
+def _patch_server_version(dbapi_conn, connection_record):
+    """Forca _server_version no objeto psycopg2 para evitar erro de parse."""
+    try:
+        # Tenta setar diretamente no objeto de conexao psycopg2
+        object.__setattr__(dbapi_conn, '_server_version', 140000)
+    except (AttributeError, TypeError):
+        pass
 
 # ============================================================
 # CONFIGURAR OCR (EasyOCR)
@@ -87,6 +84,8 @@ def get_engine():
                 'options': '-c statement_timeout=60000'
             }
         )
+        # Aplica o workaround no evento de conexao
+        event.listen(engine, 'connect', _patch_server_version)
         return engine, None
     except Exception as e:
         return None, f"Erro ao criar engine: {str(e)}"
