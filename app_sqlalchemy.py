@@ -7,8 +7,8 @@ import os
 from PIL import Image
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import OperationalError, IntegrityError
-import urllib.parse
+from sqlalchemy.exc import OperationalError, IntegrityError, ProgrammingError
+from dotenv import load_dotenv
 
 # ============================================================
 # CONFIGURAR OCR (EasyOCR)
@@ -28,19 +28,25 @@ except Exception:
 def get_engine():
     """Cria engine SQLAlchemy com connection pooling para CockroachDB."""
 
-    # Pega a URL do ambiente ou do secrets.toml
-    db_url = os.environ.get("DATABASE_URL")
+    # Tenta carregar do .env primeiro (local)
+    try:
+        load_dotenv()
+    except:
+        pass
 
+    # Pega a URL do ambiente ou do secrets.toml
+    db_url = os.environ.get("DATABASE_URL", "")
+
+    # Se não encontrou no env, tenta o secrets.toml (Streamlit Cloud)
     if not db_url:
-        # Tenta ler do secrets.toml
         try:
             db_config = st.secrets.get("database", {})
             db_url = db_config.get("url", "")
-        except:
+        except Exception:
             db_url = ""
 
     if not db_url:
-        raise ValueError("DATABASE_URL não configurada. Defina a variável de ambiente ou no secrets.toml")
+        return None
 
     # Converte "cockroachdb://" para "postgresql+psycopg2://"
     if db_url.startswith("cockroachdb://"):
@@ -50,27 +56,76 @@ def get_engine():
     engine = create_engine(
         db_url,
         poolclass=QueuePool,
-        pool_size=5,
-        max_overflow=10,
-        pool_pre_ping=True,  # Verifica conexão antes de usar
-        pool_recycle=300,    # Recicla conexões a cada 5 min
+        pool_size=3,
+        max_overflow=5,
+        pool_pre_ping=True,
+        pool_recycle=300,
         connect_args={
-            'connect_timeout': 10,
-            'options': '-c statement_timeout=30000'  # 30s timeout
+            'connect_timeout': 15,
+            'options': '-c statement_timeout=30000'
         }
     )
 
-    # Testa conexão
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT 1"))
-        assert result.fetchone()[0] == 1
-
     return engine
 
-def get_connection():
-    """Obtém uma conexão do pool."""
-    engine = get_engine()
-    return engine.connect()
+def test_connection(engine):
+    """Testa se a conexão com o banco está funcionando."""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT 1 as test"))
+            return result.fetchone()[0] == 1
+    except Exception as e:
+        return False
+
+def criar_tabela_inventario(engine):
+    """Cria a tabela de inventário se não existir. Retorna True se sucesso."""
+    try:
+        with engine.connect() as conn:
+            # Verifica se tabela já existe
+            result = conn.execute(text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'inventario'
+            """))
+
+            if result.fetchone():
+                return True  # Tabela já existe
+
+            # Cria a tabela
+            conn.execute(text("""
+                CREATE TABLE inventario (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    obra_id STRING NOT NULL,
+                    codigo STRING NOT NULL,
+                    descricao STRING NOT NULL,
+                    status STRING DEFAULT 'Pendente',
+                    data_auditoria STRING DEFAULT '',
+                    observacoes STRING DEFAULT '',
+                    quantidade STRING DEFAULT '1',
+                    local STRING DEFAULT '',
+                    created_at TIMESTAMP DEFAULT now(),
+                    updated_at TIMESTAMP DEFAULT now(),
+                    CONSTRAINT unique_codigo_obra UNIQUE (obra_id, codigo)
+                )
+            """))
+
+            # Cria índices
+            conn.execute(text("""
+                CREATE INDEX idx_inventario_obra_id ON inventario (obra_id)
+            """))
+            conn.execute(text("""
+                CREATE INDEX idx_inventario_codigo ON inventario (obra_id, codigo)
+            """))
+
+            conn.commit()
+            return True
+
+    except Exception as e:
+        st.error(f"Erro ao criar tabela: {e}")
+        return False
+
+# Inicializa engine global
+engine = get_engine()
 
 # ============================================================
 # FUNCOES DE RETRY
@@ -80,13 +135,12 @@ def execute_with_retry(query_func, max_retries=5, base_delay=0.1):
     for attempt in range(max_retries):
         conn = None
         try:
-            conn = get_connection()
+            conn = engine.connect()
             result = query_func(conn)
             conn.commit()
             return result
         except (OperationalError, IntegrityError) as e:
             error_msg = str(e).lower()
-            # Códigos de erro do CockroachDB que merecem retry
             retry_codes = ['40001', '40003', '08006', '08001', 'retry', 'serialization']
             should_retry = any(code in error_msg for code in retry_codes)
 
@@ -106,44 +160,8 @@ def execute_with_retry(query_func, max_retries=5, base_delay=0.1):
 # ============================================================
 # FUNCOES DE BANCO DE DADOS
 # ============================================================
-def criar_tabela_inventario():
-    """Cria a tabela de inventário se não existir."""
-    def _criar(conn):
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS inventario (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                obra_id STRING NOT NULL,
-                codigo STRING NOT NULL,
-                descricao STRING NOT NULL,
-                status STRING DEFAULT 'Pendente',
-                data_auditoria STRING DEFAULT '',
-                observacoes STRING DEFAULT '',
-                quantidade STRING DEFAULT '1',
-                local STRING DEFAULT '',
-                created_at TIMESTAMP DEFAULT now(),
-                updated_at TIMESTAMP DEFAULT now(),
-                CONSTRAINT unique_codigo_obra UNIQUE (obra_id, codigo)
-            )
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_inventario_obra_id 
-            ON inventario (obra_id)
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_inventario_codigo 
-            ON inventario (obra_id, codigo)
-        """))
-        return True
-
-    try:
-        execute_with_retry(_criar)
-    except Exception as e:
-        st.error(f"Erro ao criar tabela: {e}")
-
 def carregar_do_banco(obra_id="default"):
     try:
-        criar_tabela_inventario()
-
         def _carregar(conn):
             result = conn.execute(text("""
                 SELECT codigo, descricao, status, data_auditoria, 
@@ -189,7 +207,6 @@ def carregar_do_banco(obra_id="default"):
 
 def salvar_lote_banco(df, obra_id="default"):
     try:
-        criar_tabela_inventario()
         total_excel = len(df)
 
         def _contar(conn):
@@ -287,8 +304,6 @@ def salvar_lote_banco(df, obra_id="default"):
 
 def salvar_item_banco(codigo, descricao, status="Pendente", data_aud="", obs="", qtd="1", local="", obra_id="default"):
     try:
-        criar_tabela_inventario()
-
         def _salvar(conn):
             result = conn.execute(text("""
                 SELECT id FROM inventario 
@@ -352,8 +367,6 @@ def deletar_tudo_banco():
 
 def listar_obras_banco():
     try:
-        criar_tabela_inventario()
-
         def _listar(conn):
             result = conn.execute(text("""
                 SELECT DISTINCT obra_id FROM inventario ORDER BY obra_id
@@ -449,8 +462,42 @@ st.markdown("""
     .warning-box { background: #FFFBEB; border-left: 4px solid #F59E0B; padding: 16px; border-radius: 8px; margin: 12px 0; }
     .ocr-box { background: #EFF6FF; border: 2px solid #3B82F6; border-radius: 12px; padding: 16px; margin: 12px 0; }
     .sem-pat-box { background: #F3E8FF; border: 2px solid #9333EA; border-radius: 12px; padding: 16px; margin: 12px 0; }
+    .info-box { background: #DBEAFE; border-left: 4px solid #3B82F6; padding: 16px; border-radius: 8px; margin: 12px 0; }
     </style>
     """, unsafe_allow_html=True)
+
+# ============================================================
+# VERIFICACAO INICIAL DO BANCO (AUTO-CREATE TABLE)
+# ============================================================
+if engine is None:
+    st.error("""
+    ❌ **DATABASE_URL não configurada!**
+
+    Configure no Streamlit Cloud Secrets:
+    ```toml
+    [database]
+    url = "postgresql+psycopg2://usuario:senha@host:porta/database?sslmode=verify-full"
+    ```
+    """)
+    st.stop()
+
+# Testa conexão e cria tabela automaticamente
+with st.spinner("🔌 Conectando ao CockroachDB e verificando tabela..."):
+    if not test_connection(engine):
+        st.error("""
+        ❌ **Não foi possível conectar ao CockroachDB!**
+
+        Verifique:
+        1. A URL está correta no Secrets
+        2. O cluster está ativo (não pausado)
+        3. A senha está correta
+        """)
+        st.stop()
+
+    tabela_criada = criar_tabela_inventario(engine)
+    if not tabela_criada:
+        st.error("❌ Erro ao criar/verificar tabela 'inventario'")
+        st.stop()
 
 # ============================================================
 # INTERFACE PRINCIPAL
@@ -610,32 +657,6 @@ if df_atual.empty:
     2. Importe o Excel pela barra lateral
     3. Use a aba "Scanner e OCR" para auditar com foto
     4. Os dados sao salvos automaticamente no CockroachDB (ACID)
-    """)
-
-    st.error("""
-    ⚠️ **Configuração necessária:**
-
-    **Opção 1 - Variável de ambiente (recomendado para local):**
-    ```bash
-    $env:DATABASE_URL = "cockroachdb://almox:H31u6KWGzHjnu4EWXOCXrQ@kooky-singer-16481.jxf.gcp-us-east1.cockroachlabs.cloud:26257/defaultdb?sslmode=verify-full"
-    ```
-
-    **Opção 2 - secrets.toml (recomendado para Streamlit Cloud):**
-    ```toml
-    [database]
-    url = "cockroachdb://almox:H31u6KWGzHjnu4EWXOCXrQ@kooky-singer-16481.jxf.gcp-us-east1.cockroachlabs.cloud:26257/defaultdb?sslmode=verify-full"
-    ```
-
-    **requirements.txt:**
-    ```
-    streamlit
-    pandas
-    openpyxl
-    Pillow
-    easyocr
-    sqlalchemy
-    psycopg2-binary
-    ```
     """)
 else:
     tab1, tab2, tab3, tab_sobre = st.tabs(["Scanner e OCR", "Lista Completa", "Dashboard", "Sobre"])
@@ -843,6 +864,7 @@ else:
                     <li>Exportação Excel</li>
                     <li>ACID Transactions (CockroachDB)</li>
                     <li>Sem conflitos multi-usuário</li>
+                    <li>Auto-criação de tabela</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
@@ -861,4 +883,4 @@ else:
         """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.caption("Sistema de Auditoria de Ativos - CockroachDB + SQLAlchemy Edition")
+st.caption("Sistema de Auditoria de Ativos")
