@@ -34,15 +34,15 @@ def get_engine():
         db_config = st.secrets.get("database", {})
         db_url = db_config.get("url", "")
         if db_url:
-            st.sidebar.success("✅ Secrets carregados do Streamlit Cloud")
+            pass  # Secrets carregados (oculto)
     except Exception as e:
-        st.sidebar.warning(f"⚠️ Secrets não acessíveis: {e}")
+        pass  # Secrets não acessíveis (oculto)
     
     # Se não achou no secrets, tenta variável de ambiente
     if not db_url:
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url:
-            st.sidebar.info("ℹ️ Usando DATABASE_URL do ambiente")
+            pass  # DATABASE_URL do ambiente (oculto)
     
     if not db_url:
         return None, "Nenhuma DATABASE_URL encontrada. Configure em Settings → Secrets."
@@ -58,7 +58,7 @@ def get_engine():
     
     # Mascara a URL para log
     url_display = re.sub(r'://[^:]+:[^@]+@', '://***:***@', db_url)
-    st.sidebar.text(f"URL detectada: {url_display[:60]}...")
+    pass  # URL detectada (oculto)
     
     try:
         engine = create_engine(
@@ -89,7 +89,7 @@ def test_connection(engine):
             result = conn.execute(text("SELECT 1 as test"))
             return result.fetchone()[0] == 1
     except Exception as e:
-        st.sidebar.error(f"❌ Erro na conexão: {str(e)}")
+        pass  # Erro na conexão (oculto)
         return False
 
 def criar_tabela_inventario(engine):
@@ -468,51 +468,20 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ============================================================
-# VERIFICACAO INICIAL DO BANCO
+# VERIFICACAO INICIAL DO BANCO (silenciosa)
 # ============================================================
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔍 Diagnóstico de Conexão")
 
 if engine is None:
-    st.sidebar.error(f"❌ Engine não criada: {erro_engine}")
-    st.error(f"""
-    ❌ **DATABASE_URL não configurada ou inválida!**
-    
-    **Erro:** {erro_engine}
-    
-    **Configure no Streamlit Cloud Secrets:**
-    ```toml
-    [database]
-    url = "cockroachdb://usuario:senha@host:porta/database?sslmode=require"
-    ```
-    """)
+    st.error(f"❌ DATABASE_URL não configurada: {erro_engine}")
     st.stop()
 
-with st.spinner("🔌 Conectando ao CockroachDB e verificando tabela..."):
-    conectado = test_connection(engine)
-    if not conectado:
-        st.error("""
-        ❌ **Não foi possível conectar ao CockroachDB!**
-        
-        **Verifique:**
-        1. A URL está correta no Secrets
-        2. O cluster está ativo (não pausado)
-        3. A senha está correta
-        4. O usuário tem permissões no banco
-        """)
+with st.spinner("🔌 Conectando ao CockroachDB..."):
+    if not test_connection(engine):
+        st.error("❌ Não foi possível conectar ao CockroachDB!")
         st.stop()
-    
-    st.sidebar.success("✅ Conexão com CockroachDB OK!")
-    
-    tabela_criada = criar_tabela_inventario(engine)
-    if not tabela_criada:
-        st.error("❌ Erro ao criar/verificar tabela 'inventario'")
+    if not criar_tabela_inventario(engine):
+        st.error("❌ Erro ao verificar tabela 'inventario'")
         st.stop()
-    
-    st.sidebar.success("✅ Tabela 'inventario' verificada!")
-
-# ============================================================
 # INTERFACE PRINCIPAL
 # ============================================================
 st.markdown("<h1 style=\"color: #0F172A; margin-bottom: 8px;\">Auditoria de Ativos</h1>", unsafe_allow_html=True)
