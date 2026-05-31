@@ -21,7 +21,7 @@ except Exception:
     _EASYOCR_READER = None
 
 # ============================================================
-# CONFIGURACAO SQLALCHEMY + COCKROACHDB (VERSAO CORRIGIDA)
+# CONFIGURACAO SQLALCHEMY + COCKROACHDB
 # ============================================================
 
 def get_engine():
@@ -51,13 +51,32 @@ def get_engine():
     if db_url.startswith("cockroachdb://"):
         db_url = db_url.replace("cockroachdb://", "postgresql+psycopg2://", 1)
     
+    # Garante que está usando psycopg2 (não pg8000)
+    if "pg8000" in db_url:
+        db_url = db_url.replace("postgresql+pg8000://", "postgresql+psycopg2://")
+        st.sidebar.warning("⚠️ Convertendo pg8000 para psycopg2")
+    
     # Mascara a URL para log (não expõe senha)
     url_display = db_url.replace("://", "://***:***@") if "@" in db_url else "***"
     st.sidebar.text(f"URL detectada: {url_display[:60]}...")
     
     try:
-        # CORRECAO: Adiciona connect_args para forçar versao do servidor
-        # Isso evita o erro de parse de versao do CockroachDB v25.x
+        # WORKAROUND: Forca versao do servidor para evitar erro de parse do CockroachDB v25.x
+        import psycopg2
+        # Monkey-patch para contornar o bug de versao
+        original_get_server_version = psycopg2.extensions.ConnectionInfo.server_version
+        
+        def patched_server_version(self):
+            # Retorna versao PostgreSQL 14.0 (140000) em vez de tentar parsear a do CockroachDB
+            return 140000
+        
+        psycopg2.extensions.ConnectionInfo.server_version = property(patched_server_version)
+        st.sidebar.info("🔧 Workaround de versao aplicado")
+        
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ Nao foi possivel aplicar workaround: {e}")
+    
+    try:
         engine = create_engine(
             db_url,
             poolclass=QueuePool,
@@ -68,10 +87,6 @@ def get_engine():
             connect_args={
                 'connect_timeout': 30,
                 'options': '-c statement_timeout=60000'
-            },
-            # CORRECAO: Forca versao do servidor para evitar erro de parse
-            connect_args_override={
-                'server_version': '14.0'  # Forca versao PostgreSQL compativel
             }
         )
         return engine, None
@@ -468,7 +483,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ============================================================
-# VERIFICACAO INICIAL DO BANCO (AUTO-CREATE TABLE) - CORRIGIDO
+# VERIFICACAO INICIAL DO BANCO
 # ============================================================
 
 st.sidebar.markdown("---")
@@ -489,31 +504,17 @@ if engine is None:
     """)
     st.stop()
 
-# Testa conexão e cria tabela automaticamente
 with st.spinner("🔌 Conectando ao CockroachDB e verificando tabela..."):
     conectado = test_connection(engine)
     if not conectado:
         st.error("""
         ❌ **Não foi possível conectar ao CockroachDB!**
         
-        **Erro detectado:** O driver psycopg2 não consegue parsear a versão do CockroachDB v25.x.
-        
-        **Soluções:**
-        1. **Atualize o psycopg2-binary** no requirements.txt:
-           ```
-           psycopg2-binary>=2.9.10
-           ```
-        2. **Ou use o driver pg8000** (alternativa pura Python):
-           ```
-           pg8000>=1.30.0
-           ```
-           E mude a URL para: `postgresql+pg8000://...`
-        3. **Ou atualize o SQLAlchemy**:
-           ```
-           sqlalchemy>=2.0.0
-           ```
-        
-        **Dica:** Tente primeiro atualizar o psycopg2-binary. Se não funcionar, use pg8000.
+        **Verifique:**
+        1. A URL está correta no Secrets
+        2. O cluster está ativo (não pausado)
+        3. A senha está correta
+        4. O usuário tem permissões no banco
         """)
         st.stop()
     
@@ -532,7 +533,6 @@ with st.spinner("🔌 Conectando ao CockroachDB e verificando tabela..."):
 st.markdown("<h1 style=\"color: #0F172A; margin-bottom: 8px;\">Auditoria de Ativos</h1>", unsafe_allow_html=True)
 st.markdown("<p style=\"color: #64748B; margin-bottom: 24px;\">Sistema de auditoria com OCR - CockroachDB + SQLAlchemy</p>", unsafe_allow_html=True)
 
-# Barra lateral
 with st.sidebar:
     st.markdown("### Identificacao da Obra")
     
@@ -663,7 +663,6 @@ with st.sidebar:
     if total > 0:
         st.progress(auditados / total, text=f"{auditados}/{total}")
 
-# Inicializa session state
 if "db" not in st.session_state:
     st.session_state.db = carregar_do_banco("obra_001")
 if "codigo_ocr" not in st.session_state:
@@ -671,9 +670,6 @@ if "codigo_ocr" not in st.session_state:
 if "arquivo_processado" not in st.session_state:
     st.session_state.arquivo_processado = False
 
-# ============================================================
-# ABAS PRINCIPAIS
-# ============================================================
 df_atual = st.session_state.db
 
 if df_atual.empty:
