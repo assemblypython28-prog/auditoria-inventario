@@ -1,0 +1,7 @@
+streamlit
+pandas
+openpyxl
+Pillow
+easyocr
+sqlalchemy
+psycopg2-binary
