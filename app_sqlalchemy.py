@@ -8,25 +8,22 @@ from PIL import Image
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import OperationalError, IntegrityError
+from sqlalchemy.dialects.postgresql.psycopg2 import PGDialect_psycopg2
 
 # ============================================================
-# WORKAROUND: Intercepta conexao psycopg2 antes do SQLAlchemy
+# WORKAROUND: Subclass do dialect para forcar versao do servidor
 # ============================================================
-import psycopg2
-from psycopg2.extensions import connection as _pg_connection
+class CockroachDBDialect(PGDialect_psycopg2):
+    """Dialect customizado que forca a versao do servidor para evitar erro de parse."""
+    
+    def _get_server_version_info(self, connection):
+        # Forca versao PostgreSQL 14.0 (140000)
+        # Isso evita o erro: "Could not determine version from string 'CockroachDB CCL v25.4.10...'"
+        return (14, 0)
 
-# Guarda o __init__ original
-_original_pg_init = _pg_connection.__init__
-
-def _patched_pg_init(self, *args, **kwargs):
-    """Patch que intercepta a conexao e forca a versao do servidor."""
-    _original_pg_init(self, *args, **kwargs)
-    # Forca a versao do servidor para PostgreSQL 14.0
-    # Isso evita o erro de parse do CockroachDB v25.x
-    object.__setattr__(self, '_server_version', 140000)
-
-# Aplica o patch no __init__ da conexao psycopg2
-_pg_connection.__init__ = _patched_pg_init
+# Registra o dialect customizado
+from sqlalchemy.dialects import registry
+registry.register("cockroachdb", __name__, "CockroachDBDialect")
 
 # ============================================================
 # CONFIGURAR OCR (EasyOCR)
@@ -424,7 +421,7 @@ def executar_ocr(imagem):
         resultados = _EASYOCR_READER.readtext(img_array, detail=1, allowlist='0123456789', paragraph=False)
         numeros = []
         for (bbox, texto, conf) in resultados:
-            if conf < 0.3:
+        if conf < 0.3:
                 continue
             nums = "".join([c for c in texto if c.isdigit()])
             if nums:
