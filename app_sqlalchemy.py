@@ -56,17 +56,22 @@ def get_engine():
     st.sidebar.text(f"URL detectada: {url_display[:60]}...")
     
     try:
-        # Cria engine com pooling otimizado para CockroachDB serverless
+        # CORRECAO: Adiciona connect_args para forçar versao do servidor
+        # Isso evita o erro de parse de versao do CockroachDB v25.x
         engine = create_engine(
             db_url,
             poolclass=QueuePool,
-            pool_size=1,           # REDUZIDO: CockroachDB serverless limita conexões
-            max_overflow=2,        # REDUZIDO: evita estourar limite
-            pool_pre_ping=True,    # Verifica conexão antes de usar
-            pool_recycle=300,      # Recicla conexões a cada 5 min
+            pool_size=1,
+            max_overflow=2,
+            pool_pre_ping=True,
+            pool_recycle=300,
             connect_args={
-                'connect_timeout': 30,      # AUMENTADO: conexões internacionais
-                'options': '-c statement_timeout=60000'  # AUMENTADO: 60s
+                'connect_timeout': 30,
+                'options': '-c statement_timeout=60000'
+            },
+            # CORRECAO: Forca versao do servidor para evitar erro de parse
+            connect_args_override={
+                'server_version': '14.0'  # Forca versao PostgreSQL compativel
             }
         )
         return engine, None
@@ -87,7 +92,6 @@ def criar_tabela_inventario(engine):
     """Cria a tabela de inventário se não existir. Retorna True se sucesso."""
     try:
         with engine.connect() as conn:
-            # Verifica se tabela já existe
             result = conn.execute(text("""
                 SELECT table_name 
                 FROM information_schema.tables 
@@ -95,9 +99,8 @@ def criar_tabela_inventario(engine):
             """))
             
             if result.fetchone():
-                return True  # Tabela já existe
+                return True
             
-            # Cria a tabela
             conn.execute(text("""
                 CREATE TABLE inventario (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -115,14 +118,8 @@ def criar_tabela_inventario(engine):
                 )
             """))
             
-            # Cria índices
-            conn.execute(text("""
-                CREATE INDEX idx_inventario_obra_id ON inventario (obra_id)
-            """))
-            conn.execute(text("""
-                CREATE INDEX idx_inventario_codigo ON inventario (obra_id, codigo)
-            """))
-            
+            conn.execute(text("CREATE INDEX idx_inventario_obra_id ON inventario (obra_id)"))
+            conn.execute(text("CREATE INDEX idx_inventario_codigo ON inventario (obra_id, codigo)"))
             conn.commit()
             return True
             
@@ -130,14 +127,12 @@ def criar_tabela_inventario(engine):
         st.error(f"Erro ao criar tabela: {e}")
         return False
 
-# Inicializa engine global com diagnóstico
 engine, erro_engine = get_engine()
 
 # ============================================================
 # FUNCOES DE RETRY
 # ============================================================
 def execute_with_retry(query_func, max_retries=5, base_delay=0.5):
-    """Executa query com retry automático para erros de transação."""
     for attempt in range(max_retries):
         conn = None
         try:
@@ -476,7 +471,6 @@ st.markdown("""
 # VERIFICACAO INICIAL DO BANCO (AUTO-CREATE TABLE) - CORRIGIDO
 # ============================================================
 
-# DIAGNÓSTICO: Mostra status da engine na sidebar
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔍 Diagnóstico de Conexão")
 
@@ -492,8 +486,6 @@ if engine is None:
     [database]
     url = "postgresql+psycopg2://usuario:senha@host:porta/database?sslmode=require"
     ```
-    
-    **Ou defina a variável de ambiente DATABASE_URL.**
     """)
     st.stop()
 
@@ -504,13 +496,24 @@ with st.spinner("🔌 Conectando ao CockroachDB e verificando tabela..."):
         st.error("""
         ❌ **Não foi possível conectar ao CockroachDB!**
         
-        **Verifique:**
-        1. A URL está correta no Secrets
-        2. O cluster está ativo (não pausado)
-        3. A senha está correta
-        4. O usuário tem permissões no banco
+        **Erro detectado:** O driver psycopg2 não consegue parsear a versão do CockroachDB v25.x.
         
-        **Dica:** No console do CockroachDB, vá em **SQL Users** e certifique-se de que o usuário existe e a senha está correta.
+        **Soluções:**
+        1. **Atualize o psycopg2-binary** no requirements.txt:
+           ```
+           psycopg2-binary>=2.9.10
+           ```
+        2. **Ou use o driver pg8000** (alternativa pura Python):
+           ```
+           pg8000>=1.30.0
+           ```
+           E mude a URL para: `postgresql+pg8000://...`
+        3. **Ou atualize o SQLAlchemy**:
+           ```
+           sqlalchemy>=2.0.0
+           ```
+        
+        **Dica:** Tente primeiro atualizar o psycopg2-binary. Se não funcionar, use pg8000.
         """)
         st.stop()
     
