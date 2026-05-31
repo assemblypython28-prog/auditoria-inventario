@@ -5,20 +5,9 @@ import io
 import re
 import os
 from PIL import Image
-from sqlalchemy import create_engine, text, event
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import OperationalError, IntegrityError
-
-# ============================================================
-# WORKAROUND: Intercepta conexao e forca versao do servidor
-# ============================================================
-def _patch_server_version(dbapi_conn, connection_record):
-    """Forca _server_version no objeto psycopg2 para evitar erro de parse."""
-    try:
-        # Tenta setar diretamente no objeto de conexao psycopg2
-        object.__setattr__(dbapi_conn, '_server_version', 140000)
-    except (AttributeError, TypeError):
-        pass
 
 # ============================================================
 # CONFIGURAR OCR (EasyOCR)
@@ -32,7 +21,7 @@ except Exception:
     _EASYOCR_READER = None
 
 # ============================================================
-# CONFIGURACAO SQLALCHEMY + COCKROACHDB
+# CONFIGURACAO SQLALCHEMY + COCKROACHDB (DIALETO OFICIAL)
 # ============================================================
 
 def get_engine():
@@ -58,17 +47,17 @@ def get_engine():
     if not db_url:
         return None, "Nenhuma DATABASE_URL encontrada. Configure em Settings → Secrets."
     
-    # Converte "cockroachdb://" para "postgresql+psycopg2://"
-    if db_url.startswith("cockroachdb://"):
-        db_url = db_url.replace("cockroachdb://", "postgresql+psycopg2://", 1)
-    
-    # Garante que está usando psycopg2
-    if "pg8000" in db_url:
-        db_url = db_url.replace("postgresql+pg8000://", "postgresql+psycopg2://")
-        st.sidebar.warning("⚠️ Convertendo pg8000 para psycopg2")
+    # IMPORTANTE: Mantém o prefixo cockroachdb:// para usar o dialecto oficial
+    # O pacote sqlalchemy-cockroachdb registra automaticamente o prefixo
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "cockroachdb://", 1)
+    elif db_url.startswith("postgresql://") and not db_url.startswith("cockroachdb"):
+        db_url = db_url.replace("postgresql://", "cockroachdb://", 1)
+    elif db_url.startswith("postgresql+psycopg2://"):
+        db_url = db_url.replace("postgresql+psycopg2://", "cockroachdb+psycopg2://", 1)
     
     # Mascara a URL para log
-    url_display = db_url.replace("://", "://***:***@") if "@" in db_url else "***"
+    url_display = re.sub(r'://[^:]+:[^@]+@', '://***:***@', db_url)
     st.sidebar.text(f"URL detectada: {url_display[:60]}...")
     
     try:
@@ -79,13 +68,16 @@ def get_engine():
             max_overflow=2,
             pool_pre_ping=True,
             pool_recycle=300,
+            # CockroachDB Serverless requer sslmode=require
             connect_args={
                 'connect_timeout': 30,
                 'options': '-c statement_timeout=60000'
+            } if 'sslmode' in db_url else {
+                'connect_timeout': 30,
+                'options': '-c statement_timeout=60000',
+                'sslmode': 'require'
             }
         )
-        # Aplica o workaround no evento de conexao
-        event.listen(engine, 'connect', _patch_server_version)
         return engine, None
     except Exception as e:
         return None, f"Erro ao criar engine: {str(e)}"
@@ -103,7 +95,7 @@ def test_connection(engine):
 def criar_tabela_inventario(engine):
     """Cria a tabela de inventário se não existir."""
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:  # Usa begin() para auto-commit
             result = conn.execute(text("""
                 SELECT table_name 
                 FROM information_schema.tables 
@@ -132,7 +124,6 @@ def criar_tabela_inventario(engine):
             
             conn.execute(text("CREATE INDEX idx_inventario_obra_id ON inventario (obra_id)"))
             conn.execute(text("CREATE INDEX idx_inventario_codigo ON inventario (obra_id, codigo)"))
-            conn.commit()
             return True
             
     except Exception as e:
@@ -142,32 +133,29 @@ def criar_tabela_inventario(engine):
 engine, erro_engine = get_engine()
 
 # ============================================================
-# FUNCOES DE RETRY
+# FUNCOES DE RETRY (CORRIGIDO PARA COCKROACHDB)
 # ============================================================
 def execute_with_retry(query_func, max_retries=5, base_delay=0.5):
+    """Executa query com retry para erros de serialização do CockroachDB."""
     for attempt in range(max_retries):
-        conn = None
         try:
-            conn = engine.connect()
-            result = query_func(conn)
-            conn.commit()
-            return result
+            # Usa engine.begin() para auto-commit e evitar conflitos
+            with engine.begin() as conn:
+                result = query_func(conn)
+                return result
         except (OperationalError, IntegrityError) as e:
             error_msg = str(e).lower()
-            retry_codes = ['40001', '40003', '08006', '08001', 'retry', 'serialization']
+            retry_codes = ['40001', '40003', '08006', '08001', 'retry', 'serialization', 'restart transaction']
             should_retry = any(code in error_msg for code in retry_codes)
             
             if should_retry and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
+                delay = base_delay * (2 ** attempt) + (time.random() * 0.1 if hasattr(time, 'random') else 0)
                 time.sleep(delay)
                 continue
             else:
                 raise
         except Exception:
             raise
-        finally:
-            if conn:
-                conn.close()
     return None
 
 # ============================================================
@@ -496,7 +484,7 @@ if engine is None:
     **Configure no Streamlit Cloud Secrets:**
     ```toml
     [database]
-    url = "postgresql+psycopg2://usuario:senha@host:porta/database?sslmode=require"
+    url = "cockroachdb://usuario:senha@host:porta/database?sslmode=require"
     ```
     """)
     st.stop()
