@@ -485,7 +485,7 @@ with st.spinner("🔌 Conectando ao CockroachDB..."):
 # INTERFACE PRINCIPAL
 # ============================================================
 st.markdown("<h1 style=\"color: #0F172A; margin-bottom: 8px;\">Auditoria de Ativos</h1>", unsafe_allow_html=True)
-st.markdown("<p style=\"color: #64748B; margin-bottom: 24px;\">Sistema de auditoria com OCR - CockroachDB + SQLAlchemy</p>", unsafe_allow_html=True)
+st.markdown("<p style=\"color: #64748B; margin-bottom: 24px;\">Sistema de auditoria com OCR </p>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown("### Identificacao da Obra")
@@ -822,7 +822,7 @@ else:
         <div style="background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%); border-radius: 16px; padding: 32px; color: white; margin-bottom: 24px;">
             <h2 style="color: #38BDF8; margin-top: 0;">Sistema de Auditoria de Ativos</h2>
             <p style="font-size: 16px; line-height: 1.6; color: #CBD5E1;">
-                Sistema completo com OCR e persistência ACID via CockroachDB + SQLAlchemy.
+                Sistema completo com OCR.
             </p>
         </div>
         """, unsafe_allow_html=True)
