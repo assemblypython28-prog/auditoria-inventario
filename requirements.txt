@@ -1,9 +1,0 @@
-streamlit>=1.28.0
-pandas>=2.0.0
-openpyxl>=3.1.0
-Pillow>=10.0.0
-easyocr>=1.7.0
-numpy>=1.24.0
-sqlalchemy>=2.0.0
-sqlalchemy-cockroachdb>=2.0.0
-psycopg2-binary>=2.9.0
