@@ -941,20 +941,6 @@ st.markdown('<h1 style="color: #0F172A; margin-bottom: 8px;">Auditoria de Ativos
 st.markdown('<p style="color: #64748B; margin-bottom: 24px;">Sistema de auditoria com OCR</p>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### Status de Conexao")
-    if MODO_OFFLINE:
-        st.error("🔴 Offline — usando banco local")
-        erro_conexao = st.session_state.get("ultimo_erro_conexao")
-        if erro_conexao:
-            with st.expander("🔍 Por que esta offline?"):
-                st.code(erro_conexao, language=None)
-    else:
-        st.success("🟢 Online — conectado a nuvem (Neon)")
-    if st.button("🔄 Verificar conexao agora", key="btn_verificar_conexao", use_container_width=True):
-        st.session_state.forcar_verificacao_conexao = True
-        st.rerun()
-
-    st.markdown("---")
     st.markdown("### Identificacao da Obra")
     obras_existentes = listar_obras_banco()
 
